@@ -24,54 +24,141 @@ jobs:
         run: |
           python <<'PY'
           import os
+          import sys
+          import json
           import requests
 
           BASE = "https://nami.dpsg.de/ica/rest"
+          API_BASE = f"{BASE}/api/1/1/service"
 
           username = os.environ["NAMI_USERNAME"]
           password = os.environ["NAMI_PASSWORD"]
-          group = os.environ["NAMI_GROUP_ID"]
+          group_id = os.environ["NAMI_GROUP_ID"]
 
           s = requests.Session()
+          s.headers.update({
+              "User-Agent": "Mozilla/5.0",
+              "Accept": "application/json, text/plain, */*",
+          })
 
-          # login
-          r = s.post(
-              f"{BASE}/nami/auth/manual/sessionStartup",
-              params={"username": username, "password": password}
+          def fail(msg, resp=None):
+              print(msg)
+              if resp is not None:
+                  print("URL:", resp.url)
+                  print("HTTP:", resp.status_code)
+                  print("Content-Type:", resp.headers.get("content-type"))
+                  print("Body:", resp.text[:2000])
+              sys.exit(1)
+
+          # Login gegen den API-Wrapper / Session-Start
+          # Falls dein Server einen anderen Login-Pfad nutzt, siehst du das sofort am Debug-Output.
+          login_url = f"{BASE}/nami/auth/manual/sessionStartup"
+          login_resp = s.post(
+              login_url,
+              params={
+                  "username": username,
+                  "password": password,
+              },
+              timeout=30,
+              allow_redirects=True,
           )
 
-          data = r.json()
-          if not data.get("success"):
-              raise SystemExit("Login failed")
+          if login_resp.status_code // 100 != 2:
+              fail("Login fehlgeschlagen", login_resp)
+
+          try:
+              login_json = login_resp.json()
+          except Exception:
+              fail("Login-Antwort ist kein JSON", login_resp)
+
+          # Unterstützt beide Varianten:
+          # 1) Wrapper-Response mit statusCode/apiSessionName/apiSessionToken/response
+          # 2) Direktes RestResponse-Objekt
+          if "statusCode" in login_json:
+              if login_json.get("statusCode") != 0:
+                  print(json.dumps(login_json, indent=2, ensure_ascii=False))
+                  sys.exit("API-Login fehlgeschlagen")
+
+              session_name = login_json.get("apiSessionName")
+              session_token = login_json.get("apiSessionToken")
+
+              if session_name and session_token:
+                  s.cookies.set(session_name, session_token, domain="nami.dpsg.de", path="/")
+
+              inner = login_json.get("response") or {}
+              if inner and not inner.get("success", True):
+                  print(json.dumps(login_json, indent=2, ensure_ascii=False))
+                  sys.exit("Login response.success=false")
+          else:
+              if not login_json.get("success"):
+                  print(json.dumps(login_json, indent=2, ensure_ascii=False))
+                  sys.exit("Login fehlgeschlagen")
+
+          print("Login erfolgreich")
 
           page = 1
           start = 0
           limit = 100
-
-          print("Mitglieder:\n")
+          printed = 0
 
           while True:
-              r = s.get(
-                  f"{BASE}/nami/mitglied/filtered-for-navigation/gruppierung/gruppierung/{group}/flist",
-                  params={"page": page, "start": start, "limit": limit},
+              url = f"{API_BASE}/nami/mitglied/filtered-for-navigation/gruppierung/gruppierung/{group_id}/flist"
+              resp = s.get(
+                  url,
+                  params={
+                      "page": page,
+                      "start": start,
+                      "limit": limit,
+                  },
+                  timeout=30,
               )
 
-              d = r.json()
+              if resp.status_code // 100 != 2:
+                  fail("Mitgliederabruf fehlgeschlagen", resp)
 
-              if not d.get("data"):
+              try:
+                  payload = resp.json()
+              except Exception:
+                  fail("Mitgliederabruf liefert kein JSON", resp)
+
+              # Wrapper oder direktes RestResponse
+              if "statusCode" in payload:
+                  if payload.get("statusCode") != 0:
+                      print(json.dumps(payload, indent=2, ensure_ascii=False))
+                      sys.exit("API-Wrapper meldet Fehler")
+                  data_obj = payload.get("response") or {}
+              else:
+                  data_obj = payload
+
+              if not data_obj.get("success", False):
+                  print(json.dumps(payload, indent=2, ensure_ascii=False))
+                  sys.exit("success=false beim Mitgliederabruf")
+
+              members = data_obj.get("data") or []
+              total_entries = data_obj.get("totalEntries", 0)
+
+              if not members:
                   break
 
-              for m in d["data"]:
-                  print(
-                      f"{m.get('vorname','')} {m.get('nachname','')} "
-                      f"(ID: {m.get('id')})"
+              for m in members:
+                  vorname = m.get("vorname", "")
+                  nachname = m.get("nachname", "")
+                  mid = m.get("id", "")
+                  nummer = (
+                      m.get("mitgliedsNummer")
+                      or m.get("mitgliedsnummer")
+                      or m.get("entries_mitgliedsNummer")
+                      or ""
                   )
+                  status = m.get("status") or m.get("entries_status") or ""
+                  print(f"{vorname} {nachname} | Mitgliedsnummer: {nummer} | ID: {mid} | Status: {status}")
+                  printed += 1
 
-              start += len(d["data"])
+              start += len(members)
               page += 1
 
-              if start >= d.get("totalEntries", 0):
+              if start >= total_entries:
                   break
 
-          print("\nFertig.")
+          print(f"\nFertig. {printed} Mitglieder ausgegeben.")
           PY
