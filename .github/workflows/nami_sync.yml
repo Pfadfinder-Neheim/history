@@ -1,0 +1,77 @@
+name: List NaMi members
+
+on:
+  workflow_dispatch:
+
+jobs:
+  members:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: List members
+        env:
+          NAMI_USERNAME: ${{ secrets.NAMI_USERNAME }}
+          NAMI_PASSWORD: ${{ secrets.NAMI_PASSWORD }}
+          NAMI_GROUP_ID: ${{ secrets.NAMI_GROUP_ID }}
+        run: |
+          python <<'PY'
+          import os
+          import requests
+
+          BASE = "https://nami.dpsg.de/ica/rest"
+
+          username = os.environ["NAMI_USERNAME"]
+          password = os.environ["NAMI_PASSWORD"]
+          group = os.environ["NAMI_GROUP_ID"]
+
+          s = requests.Session()
+
+          # login
+          r = s.post(
+              f"{BASE}/nami/auth/manual/sessionStartup",
+              params={"username": username, "password": password}
+          )
+
+          data = r.json()
+          if not data.get("success"):
+              raise SystemExit("Login failed")
+
+          page = 1
+          start = 0
+          limit = 100
+
+          print("Mitglieder:\n")
+
+          while True:
+              r = s.get(
+                  f"{BASE}/nami/mitglied/filtered-for-navigation/gruppierung/gruppierung/{group}/flist",
+                  params={"page": page, "start": start, "limit": limit},
+              )
+
+              d = r.json()
+
+              if not d.get("data"):
+                  break
+
+              for m in d["data"]:
+                  print(
+                      f"{m.get('vorname','')} {m.get('nachname','')} "
+                      f"(ID: {m.get('id')})"
+                  )
+
+              start += len(d["data"])
+              page += 1
+
+              if start >= d.get("totalEntries", 0):
+                  break
+
+          print("\nFertig.")
+          PY
